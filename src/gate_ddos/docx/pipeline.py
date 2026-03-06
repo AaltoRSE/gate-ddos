@@ -165,7 +165,7 @@ def _find_placeholder_span(
     if not found:
         import warnings
         combined = "\n".join(lines)
-        warnings.warn(f"Unclosed placeholder starting with '{combined[:80]}...' — missing '{end_delim}'", stacklevel=2)
+        warnings.warn(f"Unclosed placeholder starting with '{combined[:80]}...' missing '{end_delim}'", stacklevel=2)
         return None, None
 
     return end, "\n".join(lines)

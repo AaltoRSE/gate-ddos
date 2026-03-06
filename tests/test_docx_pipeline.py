@@ -156,7 +156,7 @@ class NormalizeNewlinesTests(unittest.TestCase):
         self.assertEqual(result, "line1  \nline2")
 
     def test_double_newline_unchanged(self):
-        """\\n\\n is a standard Markdown paragraph break — kept as-is."""
+        """\\n\\n is a standard Markdown paragraph break kept as-is."""
         result = normalize_newlines("para1\n\npara2")
         self.assertEqual(result, "para1\n\npara2")
 
@@ -208,7 +208,7 @@ class NormalizeNewlinesTests(unittest.TestCase):
         result = normalize_newlines("prose\n- item1\n- item2")
         self.assertNotIn("  \n-", result)
         self.assertIn("\n\n- item1", result)
-        # Consecutive list items must NOT get \n\n — tight list, no <p> per item.
+        # Consecutive list items must NOT get \n\n -> tight list, no <p> per item.
         self.assertNotIn("\n\n- item2", result)
         self.assertIn("\n- item2", result)
 
@@ -221,7 +221,7 @@ class NormalizeNewlinesTests(unittest.TestCase):
         self.assertIn("\n2. second", result)
 
     def test_newline_before_heading_stays_bare(self):
-        """# headings can interrupt paragraphs — leave the \n bare (not hard break, not \n\n)."""
+        """# headings can interrupt paragraphs leave the \n bare (not hard break, not \n\n)."""
         result = normalize_newlines("text\n## Heading")
         self.assertNotIn("  \n#", result)
         self.assertNotIn("\n\n#", result)
@@ -233,14 +233,14 @@ class NormalizeNewlinesTests(unittest.TestCase):
         self.assertIn("\n\n| a | b |", result)
 
     def test_newline_before_blockquote_stays_bare(self):
-        "> blockquotes can interrupt paragraphs — leave the \n bare."
+        "> blockquotes can interrupt paragraphs leave the \n bare."
         result = normalize_newlines("text\n> quoted")
         self.assertNotIn("  \n>", result)
         self.assertNotIn("\n\n>", result)
         self.assertIn("\n> quoted", result)
 
     def test_bold_inline_not_mistaken_for_list(self):
-        """**bold** starting a line is prose, not a list — gets a hard break."""
+        """**bold** starting a line is prose, not a list gets a hard break."""
         result = normalize_newlines("line1\n**bold** text")
         self.assertIn("  \n**bold**", result)
 
