@@ -41,7 +41,7 @@ python gate-ddos.py SYSTEM_PROMPT.md TEMPLATE.docx -o OUTPUT.docx
 Add these anywhere in a DOCX (paragraphs, table cells, headers, footers):
 
 ```text
-{{ SUMMARY    || Give the project name as one sentence. }}
+{{ SUMMARY     || Give the project name as one sentence. }}
 {{ DESCRIPTION || Describe the project goals in several sentences. }}
 {{ FOOTER }}
 ```
@@ -134,17 +134,22 @@ export OPENAI_API_KEY=your-token # macOS/Linux
 ## Code structure
 
 ```
-gate-ddos.py           Thin entry-point (sets up sys.path, calls main)
+gate-ddos.py                   Thin entry-point (sets up sys.path, calls main)
 src/gate_ddos/
-  cli.py               Argument parsing and pipeline orchestration
-  docx_pipeline.py     DOCX traversal, placeholder replacement, Markdown->DOCX rendering
-  template_engine.py   Placeholder regex, parsing, and replacer factory
-  section_store.py     In-memory cache, deduplication and prompt-mismatch detection
-  json_cache.py        JSON cache read/write
-  llm.py               LLM streaming client
-  models.py            SectionRecord and TemplateSyntax dataclasses
-  utils.py             File reading and path validation
-  constants.py         Default model name and JSON schema version
+  cli.py                       Argument parsing and pipeline orchestration
+  template_engine.py           Placeholder regex, parsing, and replacer factory
+  section_store.py             In-memory cache, deduplication and prompt-mismatch detection
+  json_cache.py                JSON cache read/write
+  llm.py                       LLM streaming client
+  models.py                    SectionRecord and TemplateSyntax dataclasses
+  utils.py                     File reading and path validation
+  constants.py                 Default model name and JSON schema version
+  docx/
+    __init__.py                Re-exports process_template_docx
+    pipeline.py                DOCX traversal, placeholder replacement, Markdown->DOCX rendering
+    styles.py                  Ensures required styles (headings, lists, tables) are present
+    markdown.py                Markdown newline normalization for DOCX output
+    html.py                    HTML post-processing (blockquotes, paragraph spacing)
 ```
 
 ---
