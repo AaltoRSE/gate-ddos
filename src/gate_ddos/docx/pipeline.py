@@ -1,3 +1,4 @@
+import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Callable
@@ -15,6 +16,20 @@ from ..template_engine import build_placeholder_pattern, build_replacer
 
 
 MARKDOWN_EXTENSIONS = ["tables", "fenced_code", "sane_lists", "smarty"]
+
+# Pattern to detect if text contains markdown block formatting (headers, lists, etc.)
+_MARKDOWN_BLOCK_RE = re.compile(
+    r"(?:^|\n)"               # start of string or newline
+    r"(?:"
+    r"#{1,6}\s"               # headers
+    r"|[-*+]\s"               # unordered list
+    r"|\d+[.)]\s"             # ordered list
+    r"|>\s"                   # blockquote
+    r"|```"                   # fenced code
+    r"|~~~"                   # fenced code alt
+    r"|\|.*\|"                # table row
+    r")"
+)
 
 
 # DOCX Element Traversal
@@ -91,6 +106,76 @@ def _markdown_to_elements(text: str, doc: Document) -> list:
     return result
 
 
+def _is_simple_text(text: str) -> bool:
+    """Check if text is simple, no markdown block formatting."""
+    # Multiple lines with blank lines indicate paragraph breaks -> not simple
+    if "\n\n" in text:
+        return False
+    # Check for markdown block patterns
+    return not _MARKDOWN_BLOCK_RE.search(text)
+
+
+def _replace_text_inline(paragraph, old_text: str, new_text: str) -> bool:
+    """Replace text inline within paragraph runs, preserving formatting."""
+    runs = paragraph.runs
+    if not runs:
+        return False
+
+    # Find runs that contain the old text (may span multiple runs)
+    full_text = "".join(r.text for r in runs)
+    start_idx = full_text.find(old_text)
+    if start_idx == -1:
+        return False
+
+    end_idx = start_idx + len(old_text)
+
+    # Map character positions to runs
+    run_starts = []
+    pos = 0
+    for run in runs:
+        run_starts.append(pos)
+        pos += len(run.text)
+
+    # Find which runs are affected
+    first_run_idx = None
+    last_run_idx = None
+    for i, run_start in enumerate(run_starts):
+        run_end = run_start + len(runs[i].text)
+        if first_run_idx is None and run_end > start_idx:
+            first_run_idx = i
+        if run_end >= end_idx:
+            last_run_idx = i
+            break
+
+    if first_run_idx is None or last_run_idx is None:
+        return False
+
+    # Simple case: replacement is entirely within one run
+    if first_run_idx == last_run_idx:
+        run = runs[first_run_idx]
+        local_start = start_idx - run_starts[first_run_idx]
+        local_end = end_idx - run_starts[first_run_idx]
+        run.text = run.text[:local_start] + new_text + run.text[local_end:]
+        return True
+
+    # Multi-run case: replacement spans multiple runs
+    # Keep the first run's formatting, put replacement text there
+    first_run = runs[first_run_idx]
+    local_start = start_idx - run_starts[first_run_idx]
+
+    last_run = runs[last_run_idx]
+    local_end = end_idx - run_starts[last_run_idx]
+
+    # Set first run text: text before placeholder + new text + text after (from last run)
+    first_run.text = first_run.text[:local_start] + new_text + last_run.text[local_end:]
+
+    # Clear intermediate runs and last run
+    for i in range(first_run_idx + 1, last_run_idx + 1):
+        runs[i].text = ""
+
+    return True
+
+
 # Paragraph Replacement Logic
 
 
@@ -100,6 +185,10 @@ def _replace_in_paragraph(paragraph, replace_text: Callable[[str], str], doc: Do
     updated = replace_text(original)
     if updated == original:
         return
+
+    if _is_simple_text(updated) and paragraph.runs:
+        if _replace_text_inline(paragraph, original, updated):
+            return
 
     parent = paragraph._p.getparent()
     if parent is None:
