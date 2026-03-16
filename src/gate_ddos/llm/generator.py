@@ -59,7 +59,7 @@ class LLMGenerator:
         ]
 
         if self.ui is not None:
-            self.ui.phase("Section", stream_title="Draft")
+            self.ui.phase("Section", stream_title="Draft", render=False)
         return self._chat(
             messages,
             stream=self.stream,
@@ -157,7 +157,7 @@ class LLMGenerator:
             return
 
         if stream:
-            self.ui.stream_done()
+            self.ui.stream_done(result)
             return
         self.ui.render_markdown(phase.title(), result)
 

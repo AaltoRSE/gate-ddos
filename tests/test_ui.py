@@ -15,6 +15,23 @@ from gate_ddos.ui import CliUI
 
 
 class CliUiTests(unittest.TestCase):
+    def test_section_generating_combines_prompt_into_status_line(self):
+        ui = CliUI(backend="ollama", model="test", enabled=True)
+        ui._console = None
+
+        stderr = io.StringIO()
+        original_stderr = sys.stderr
+        sys.stderr = stderr
+        try:
+            ui.start_template("template.md", "output.md", 1)
+            ui.section_generating("SUMMARY", "one sentence", force=False)
+        finally:
+            sys.stderr = original_stderr
+
+        output = stderr.getvalue()
+        self.assertIn("[1/1] SUMMARY | generating | prompt: one sentence", output)
+        self.assertNotIn("Prompt: one sentence", output)
+
     def test_section_done_includes_chars_words_and_generation_time(self):
         ui = CliUI(backend="ollama", model="test", enabled=True)
         ui._console = None
@@ -35,27 +52,52 @@ class CliUiTests(unittest.TestCase):
         self.assertIn("5 words", output)
         self.assertIn("1.6s", output)
 
-    def test_stream_markdown_renders_formatted_content_inside_panel(self):
+    def test_stream_output_prints_section_heading_once(self):
         ui = CliUI(backend="ollama", model="test", enabled=True)
         ui._console = Console(file=io.StringIO(), width=60, soft_wrap=False, force_terminal=False, color_system=None)
+        ui.start_template("template.md", "output.md", 1)
+        ui.section_generating("SUMMARY", "one sentence", force=False)
         ui.phase("Draft")
 
-        ui.answer("# Title\n\n- one\n- two\n\n**bold** text")
+        ui.answer("Hello")
+        ui.answer(" world")
+        ui.stream_done()
 
-        renderable = ui._build_stream_renderable()
-        self.assertIsNotNone(renderable)
-
-        ui._console.print(renderable)
         console_file = cast(io.StringIO, ui._console.file)
         self.assertIsInstance(console_file, io.StringIO)
         output = console_file.getvalue()
 
+        self.assertNotIn(" Section ", output)
+        self.assertIn("Draft | [1/1] SUMMARY", output)
+        self.assertEqual(output.count("Draft | [1/1] SUMMARY"), 1)
+        self.assertIn("Hello world", output)
+        self.assertEqual(output.count("Hello world"), 1)
+        self.assertIn("╭", output)
+        self.assertIn("╰", output)
+        self.assertIn("│ Hello world", output)
+
+    def test_stream_done_renders_final_markdown_once(self):
+        ui = CliUI(backend="ollama", model="test", enabled=True)
+        ui._console = Console(file=io.StringIO(), width=60, soft_wrap=False, force_terminal=False, color_system=None)
+        ui.start_template("template.md", "output.md", 1)
+        ui.section_generating("SUMMARY", "one sentence", force=False)
+        ui.phase("Draft")
+
+        ui.answer("# Title\n\n- one\n- two")
+        ui.stream_done("# Title\n\n- one\n- two")
+
+        console_file = cast(io.StringIO, ui._console.file)
+        output = console_file.getvalue()
+
+        self.assertNotIn("Draft Markdown", output)
         self.assertIn("Title", output)
         self.assertIn("one", output)
         self.assertIn("two", output)
         self.assertNotIn("# Title", output)
         self.assertNotIn("- one", output)
-        self.assertGreater(output.count("\n"), 4)
+        self.assertIn("╭", output)
+        self.assertIn("╰", output)
+        self.assertIn("│", output)
 
     def test_phase_can_use_distinct_stream_panel_title(self):
         ui = CliUI(backend="ollama", model="test", enabled=True)
@@ -69,60 +111,28 @@ class CliUiTests(unittest.TestCase):
         ui = CliUI(backend="ollama", model="test", enabled=True)
         ui._console = Console(file=io.StringIO(), width=60, soft_wrap=False, force_terminal=False, color_system=None)
 
+        ui.start_template("template.md", "output.md", 1)
+        ui.section_generating("SUMMARY", "one sentence", force=False)
         ui.phase("Generating response", stream_title="Draft")
         ui.answer("Hello")
 
         self.assertEqual(ui._phase_title, "Generating response")
         self.assertEqual(ui._stream_title, "Draft")
 
-    def test_tail_stream_lines_keeps_latest_lines(self):
+    def test_stream_done_resets_stream_state(self):
         ui = CliUI(backend="ollama", model="test", enabled=True)
+        ui._console = Console(file=io.StringIO(), width=60, soft_wrap=False, force_terminal=False, color_system=None)
 
-        preview = ui._tail_stream_lines(
-            "Line 1\nLine 2\nLine 3\nLine 4\nLine 5",
-            max_lines=3,
-        )
-
-        self.assertNotIn("Line 1", preview)
-        self.assertIn("Line 5", preview)
-        self.assertEqual(preview, "Line 3\nLine 4\nLine 5")
-
-    def test_tail_stream_lines_preserves_latest_markdown_block(self):
-        ui = CliUI(backend="ollama", model="test", enabled=True)
-
-        preview = ui._tail_stream_lines(
-            "Intro\n## Latest heading\n\n- latest item\nFinal paragraph",
-            max_lines=3,
-        )
-
-        self.assertEqual(preview, "\n- latest item\nFinal paragraph")
-
-    def test_stream_suspends_and_restores_progress(self):
-        ui = CliUI(backend="ollama", model="test", enabled=True)
-        ui.phase("Draft")
-
-        ui.start_template("template.md", "output.md", 2)
-
-        self.assertIsNotNone(ui._progress)
-        self.assertEqual(ui._progress_completed, 0)
-        assert ui._progress is not None
-        self.assertEqual(len(ui._progress.columns), 4)
-
+        ui.start_template("template.md", "output.md", 1)
+        ui.section_generating("SUMMARY", "one sentence", force=False)
+        ui.phase("Generating response", stream_title="Draft")
         ui.answer("Hello")
-
-        self.assertTrue(ui._stream_open)
-        self.assertTrue(ui._progress_suspended)
-        self.assertIsNone(ui._progress)
-        self.assertIsNotNone(ui._stream_live)
-
         ui.stream_done()
 
         self.assertFalse(ui._stream_open)
-        self.assertFalse(ui._progress_suspended)
-        self.assertIsNotNone(ui._progress)
-        self.assertIsNone(ui._stream_live)
-
-        ui.close()
+        self.assertEqual(ui._stream_title, "Generating response")
+        self.assertEqual(ui._stream_answer_buffer, "")
+        self.assertEqual(ui._stream_rendered_length, 0)
 
     def test_plain_output_stream_writes_immediately(self):
         ui = CliUI(backend="ollama", model="test", enabled=True)
@@ -132,13 +142,18 @@ class CliUiTests(unittest.TestCase):
         original_stderr = sys.stderr
         sys.stderr = stderr
         try:
+            ui.start_template("template.md", "output.md", 1)
+            ui.section_generating("SUMMARY", "one sentence", force=False)
+            ui.phase("Draft")
             ui.answer("Hello")
             ui.answer(" world")
             ui.stream_done()
         finally:
             sys.stderr = original_stderr
 
-        self.assertEqual(stderr.getvalue(), "Hello world\n")
+        output = stderr.getvalue()
+        self.assertIn("Draft | [1/1] SUMMARY", output)
+        self.assertIn("Hello world\n", output)
 
     def test_complete_includes_stats_summary_in_plain_output(self):
         ui = CliUI(backend="ollama", model="test", enabled=True)

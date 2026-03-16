@@ -1,3 +1,4 @@
+import io
 import sys
 import time
 from pathlib import Path
@@ -7,16 +8,8 @@ from typing import Any
 
 try:
     from rich.console import Console, Group
-    from rich.live import Live
     from rich.markdown import Markdown
     from rich.panel import Panel
-    from rich.progress import (
-        BarColumn,
-        MofNCompleteColumn,
-        Progress,
-        SpinnerColumn,
-        TextColumn,
-    )
     from rich.rule import Rule
     from rich.text import Text
 except Exception:
@@ -25,14 +18,8 @@ else:
     _RICH_COMPONENTS = {
         "Console": Console,
         "Group": Group,
-        "Live": Live,
         "Markdown": Markdown,
         "Panel": Panel,
-        "Progress": Progress,
-        "SpinnerColumn": SpinnerColumn,
-        "TextColumn": TextColumn,
-        "BarColumn": BarColumn,
-        "MofNCompleteColumn": MofNCompleteColumn,
         "Rule": Rule,
         "Text": Text,
     }
@@ -45,17 +32,14 @@ class CliUI:
         self.backend = backend
         self.model = model
         self.enabled = enabled
-        self._progress = None
-        self._task_id = None
-        self._progress_total = 0
-        self._progress_completed = 0
-        self._progress_description = "Resolving sections"
-        self._progress_suspended = False
+        self._total_sections = 0
+        self._completed_sections = 0
+        self._current_section_key: str | None = None
         self._stream_open = False
-        self._stream_live = None
+        self._stream_frame_open = False
         self._stream_title = "Draft"
         self._stream_answer_buffer = ""
-        self._stream_thinking_buffer = ""
+        self._stream_rendered_length = 0
         self._phase_title = "Run"
         self._started_at = time.perf_counter()
         self._active_section_started_at: float | None = None
@@ -178,12 +162,16 @@ class CliUI:
         return " ".join(parts)
 
     def start_template(self, template_path: str | Path, output_path: str | Path, total_sections: int) -> None:
-        """Render the run header and start section progress tracking."""
+        """Render the run header and initialize section tracking."""
         if not self.enabled:
             return
 
         self._started_at = time.perf_counter()
         self._stats = self._new_stats()
+        self._total_sections = total_sections
+        self._completed_sections = 0
+        self._current_section_key = None
+        self._stream_open = False
         template = Path(template_path)
         output = Path(output_path)
         group_cls = self._rich.get("Group")
@@ -201,210 +189,224 @@ class CliUI:
 
         if total_sections > 0:
             self.note(f"Loaded template and found {total_sections} placeholder(s).", style="cyan")
-            self._start_progress(total_sections)
             return
 
         self.note("No placeholders found. Writing output without any LLM generation.", style="yellow")
 
-    def _start_progress(self, total_sections: int) -> None:
-        """Create a progress bar for placeholder resolution."""
-        if not self.enabled:
-            return
-
-        self._progress_total = total_sections
-        self._progress_completed = 0
-        self._progress_description = "Resolving sections"
-        self._progress_suspended = False
-
-        progress_cls = self._rich.get("Progress")
-        if self._console is not None and progress_cls:
-            self._create_progress(total_sections, completed=0, description=self._progress_description)
-            return
-
-        print(f"Sections: 0/{total_sections}", file=sys.stderr)
-
-    def _create_progress(self, total_sections: int, *, completed: int, description: str) -> None:
-        """Instantiate a Rich progress bar with preserved state."""
-        progress_cls = self._rich.get("Progress")
-        if self._console is None or progress_cls is None:
-            return
-
-        self._progress = progress_cls(
-            self._rich["SpinnerColumn"](style="cyan"),
-            self._rich["TextColumn"]("[bold cyan]{task.description}"),
-            self._rich["BarColumn"](bar_width=28),
-            self._rich["MofNCompleteColumn"](),
-            console=self._console,
-            transient=False,
-        )
-        self._progress.start()
-        self._task_id = self._progress.add_task(description, total=total_sections, completed=completed)
-
-    def _stop_progress(self) -> None:
-        """Stop the active progress display without discarding tracked state."""
-        if self._progress is not None:
-            self._progress.stop()
-            self._progress = None
-            self._task_id = None
-
     def _clear_stream_state(self) -> None:
-        """Reset any active stream buffers."""
+        """Reset stream state for the next section."""
+        self._stream_open = False
+        self._stream_frame_open = False
         self._stream_answer_buffer = ""
-        self._stream_thinking_buffer = ""
+        self._stream_rendered_length = 0
         self._stream_title = self._phase_title
 
-    def _build_stream_renderable(self):
-        """Build the live renderable for an active streamed response."""
-        group_cls = self._rich.get("Group")
-        markdown_cls = self._rich.get("Markdown")
-        panel_cls = self._rich.get("Panel")
-        text_cls = self._rich.get("Text")
+    def _markdown_stream_enabled(self) -> bool:
+        """Return True when the console can render incremental markdown."""
+        return self._console is not None and self._rich.get("Markdown") is not None
 
-        if panel_cls is None:
-            return None
-
-        blocks: list[Any] = []
-        if self._stream_thinking_buffer.strip() and text_cls is not None:
-            preview = self._tail_stream_lines(
-                self._stream_thinking_buffer,
-                max_lines=6,
-            )
-            blocks.append(panel_cls(text_cls(preview, style="yellow"), title="Thinking", border_style="yellow"))
-
-        answer_text = self._stream_answer_buffer or "_Waiting for streamed content..._"
-        answer_preview = self._tail_stream_lines(
-            answer_text,
-            max_lines=self._stream_answer_max_lines(),
-        )
-        if markdown_cls is not None:
-            answer_renderable = markdown_cls(answer_preview)
-        elif text_cls is not None:
-            answer_renderable = text_cls(answer_preview)
-        else:
-            answer_renderable = answer_preview
-
-        blocks.append(panel_cls(answer_renderable, title=self._stream_title, border_style="blue"))
-        if group_cls is not None:
-            return group_cls(*blocks)
-        return blocks[-1]
-
-    def _stream_answer_max_lines(self) -> int:
-        """Estimate how many answer lines fit in the terminal during streaming."""
-        if self._console is None:
-            return 12
-
-        reserved_lines = 7
-        if self._stream_thinking_buffer.strip():
-            reserved_lines += 9
-        return max(6, self._console.size.height - reserved_lines)
-
-    def _tail_stream_lines(self, text: str, *, max_lines: int) -> str:
-        """Return the newest logical lines for compact live previews."""
-        if not text:
-            return ""
-
-        lines = text.splitlines() or [text]
-        if len(lines) <= max_lines:
-            return "\n".join(lines)
-
-        return "\n".join(lines[-max_lines:])
-
-    def _ensure_stream_session(self) -> bool:
-        """Start a live stream preview when Rich is available."""
-        if not self.enabled:
-            return False
-        if self._stream_live is not None:
-            return True
-
-        self._suspend_progress()
+    def _ensure_stream_header(self) -> None:
+        """Print the per-section stream heading once."""
+        if self._stream_open:
+            return
+        if self._markdown_stream_enabled():
+            self._open_stream_frame()
+            return
+        self.note(f"{self._stream_title} | {self._section_label()}", style="magenta")
         self._stream_open = True
 
-        live_cls = self._rich.get("Live")
-        if self._console is None or live_cls is None:
-            return False
+    def _stream_frame_width(self) -> int:
+        """Return the width used for the static draft frame."""
+        if self._console is None:
+            return 80
+        return max(40, min(self._console.size.width, 120))
 
-        renderable = self._build_stream_renderable()
-        if renderable is None:
-            return False
+    def _stream_frame_content_width(self) -> int:
+        """Return the content width inside the draft frame."""
+        return self._stream_frame_width() - 4
 
-        self._stream_live = live_cls(renderable, console=self._console, transient=False, refresh_per_second=8)
-        self._stream_live.start()
-        return True
+    def _stream_border(self, title: str | None = None):
+        """Build a single-line smooth border for the draft frame."""
+        width = self._stream_frame_width()
+        if width < 4:
+            width = 4
+        text_cls = self._rich.get("Text")
+        inner = max(0, width - 2)
 
-    def _update_stream_preview(self) -> None:
-        """Refresh the active live markdown preview."""
-        if self._stream_live is None:
+        if not title:
+            line = "╰" + ("─" * inner) + "╯"
+            return text_cls(line, style="blue") if text_cls is not None else line
+
+        label = f" {title} "
+        if len(label) >= inner:
+            trimmed = label[:inner]
+            line = "╭" + trimmed + "╮"
+            return text_cls(line, style="blue") if text_cls is not None else line
+
+        remaining = inner - len(label)
+        left = remaining // 2
+        right = remaining - left
+        if text_cls is None:
+            return "╭" + ("─" * left) + label + ("─" * right) + "╮"
+
+        border = text_cls()
+        border.append("╭", style="blue")
+        border.append("─" * left, style="blue")
+        border.append(label, style="bold cyan")
+        border.append("─" * right, style="blue")
+        border.append("╮", style="blue")
+        return border
+
+    def _stream_frame_line(self, line: str = ""):
+        """Build one line inside the static draft frame."""
+        content_width = self._stream_frame_content_width()
+        if len(line) > content_width:
+            line = line[:content_width]
+        text_cls = self._rich.get("Text")
+        padded = line.ljust(content_width)
+        if text_cls is None:
+            return f"│ {padded} │"
+
+        framed = text_cls()
+        framed.append("│ ", style="blue")
+        framed.append(padded)
+        framed.append(" │", style="blue")
+        return framed
+
+    def _print_stream_frame_line(self, line: str = "") -> None:
+        """Print one line inside the static draft frame."""
+        print_line = self._stream_frame_line(line)
+        if self._console is not None:
+            self._console.print(print_line)
+            self._console.file.flush()
             return
-        renderable = self._build_stream_renderable()
-        if renderable is not None:
-            self._stream_live.update(renderable)
+        print(print_line, file=sys.stderr)
 
-    def _suspend_progress(self) -> None:
-        """Hide the live progress display while streaming inline output."""
-        if self._progress is None or self._task_id is None:
+    def _open_stream_frame(self) -> None:
+        """Open the static draft frame once for the current stream."""
+        if self._stream_frame_open:
             return
-        self._stop_progress()
-        self._progress_suspended = True
+        title = f"{self._stream_title} | {self._section_label()}"
+        border = self._stream_border(title)
+        if self._console is not None:
+            self._console.print(border)
+            self._console.file.flush()
+        else:
+            print(border, file=sys.stderr)
+        self._stream_open = True
+        self._stream_frame_open = True
 
-    def _resume_progress(self) -> None:
-        """Restore the progress display after inline streaming completes."""
-        if not self.enabled or not self._progress_suspended:
+    def _close_stream_frame(self) -> None:
+        """Close the static draft frame after streaming completes."""
+        if not self._stream_frame_open:
             return
-        self._progress_suspended = False
-        if self._progress_total <= 0 or self._progress_completed >= self._progress_total:
-            return
-        if self._console is not None and self._rich.get("Progress") is not None:
-            self._create_progress(
-                self._progress_total,
-                completed=self._progress_completed,
-                description=self._progress_description,
-            )
-            return
-        print(f"Sections: {self._progress_completed}/{self._progress_total}", file=sys.stderr)
+        border = self._stream_border()
+        if self._console is not None:
+            self._console.print(border)
+            self._console.file.flush()
+        else:
+            print(border, file=sys.stderr)
+        self._stream_frame_open = False
 
-    def _update_progress(self, description: str | None = None, *, advance: int = 0) -> None:
-        """Update the active progress task when present."""
-        if description is not None:
-            self._progress_description = description
-        if advance:
-            self._progress_completed += advance
+    @staticmethod
+    def _balanced_fences(text: str) -> bool:
+        """Return True when common fenced-code markers are balanced."""
+        return text.count("```") % 2 == 0 and text.count("~~~") % 2 == 0
 
-        if (
-            not self.enabled
-            or self._progress_suspended
-            or self._progress is None
-            or self._task_id is None
-        ):
+    @classmethod
+    def _markdown_flush_boundary(cls, text: str) -> int:
+        """Return a safe incremental flush point for streamed markdown."""
+        boundary = text.rfind("\n") + 1
+        while boundary > 0:
+            if cls._balanced_fences(text[:boundary]):
+                return boundary
+            boundary = text.rfind("\n", 0, max(0, boundary - 1)) + 1
+        return 0
+
+    def _render_markdown_chunk(self, content: str) -> None:
+        """Render one markdown chunk without using a live-updating view."""
+        markdown_cls = self._rich.get("Markdown")
+        if self._console is None or markdown_cls is None or not content.strip():
             return
-        update_kwargs = {"task_id": self._task_id, "advance": advance}
-        if description is not None:
-            update_kwargs["description"] = description
-        self._progress.update(**update_kwargs)
+
+        capture = io.StringIO()
+        render_console = self._rich["Console"](
+            file=capture,
+            width=self._stream_frame_content_width(),
+            soft_wrap=False,
+            highlight=False,
+            color_system=None,
+        )
+        render_console.print(markdown_cls(content), end="")
+        rendered = capture.getvalue().rstrip("\n")
+        lines = rendered.splitlines() if rendered else [""]
+        for line in lines:
+            self._print_stream_frame_line(line)
+
+    def _flush_stream_markdown(self, *, final: bool = False, content: str | None = None) -> None:
+        """Render newly completed markdown content for the active stream."""
+        if not self._markdown_stream_enabled():
+            return
+
+        if final and content is not None:
+            self._stream_answer_buffer = content
+
+        pending = self._stream_answer_buffer[self._stream_rendered_length :]
+        if not pending:
+            return
+
+        boundary = len(pending) if final else self._markdown_flush_boundary(pending)
+        if boundary <= 0:
+            return
+
+        chunk = pending[:boundary]
+        self._render_markdown_chunk(chunk)
+        self._stream_rendered_length += boundary
+
+    def _section_position(self) -> str:
+        """Return the current section position label."""
+        if self._total_sections <= 0:
+            return "[0/0]"
+
+        current = min(self._completed_sections + 1, self._total_sections)
+        return f"[{current}/{self._total_sections}]"
+
+    def _section_label(self, section_key: str | None = None) -> str:
+        """Return a compact label for the active section."""
+        key = section_key or self._current_section_key or "section"
+        return f"{self._section_position()} {key}"
+
+    def _set_current_section(self, section_key: str) -> None:
+        """Track which section is currently being processed."""
+        self._current_section_key = section_key
 
     def section_key_only(self, section_key: str) -> None:
         """Report reuse of a key-only section."""
         self._active_section_started_at = None
-        self._update_progress(f"Using stored section: {section_key}")
+        self._set_current_section(section_key)
+        self.note(f"{self._section_label(section_key)} | using stored section", style="blue")
 
     def section_generating(self, section_key: str, prompt_preview: str, *, force: bool) -> None:
         """Report active section generation."""
         suffix = " (forced)" if force else ""
         self._active_section_started_at = time.perf_counter()
-        self._update_progress(f"Generating section: {section_key}{suffix}")
+        self._set_current_section(section_key)
         preview = self._preview_text(prompt_preview)
-        self.note(f"[generate] {section_key}{suffix}: {preview}", style="cyan")
+        self.note(
+            f"{self._section_label(section_key)} | generating{suffix} | prompt: {preview}",
+            style="cyan",
+        )
 
     def section_cached(self, section_key: str, source_label: str) -> None:
         """Report cache reuse for a prompted section."""
         self._active_section_started_at = None
-        self._update_progress(f"Using cached {source_label}: {section_key}")
-        self.note(f"[cache] {section_key} from {source_label}", style="blue")
+        self._set_current_section(section_key)
+        self.note(f"{self._section_label(section_key)} | using {source_label}", style="blue")
 
     def section_done(self, section_key: str, source_label: str, text: str = "") -> None:
         """Advance the section progress bar and print a short completion line."""
         if not self.enabled:
             return
-        self._update_progress(f"Completed section: {section_key}", advance=1)
         style = "green"
         if source_label in {"JSON file", "LLM cache", "stored"}:
             self._stats["cached"] += 1 if source_label in {"JSON file", "LLM cache"} else 0
@@ -423,15 +425,28 @@ class CliUI:
             elapsed_seconds = max(0.0, time.perf_counter() - self._active_section_started_at)
         self._active_section_started_at = None
         suffix = self._section_metrics_text(text, elapsed_seconds=elapsed_seconds)
-        self.note(f"[{source_label}] {section_key}{suffix}", style=style)
+        self.note(f"{self._section_label(section_key)} | {source_label}{suffix}", style=style)
+        if self._completed_sections < self._total_sections:
+            self._completed_sections += 1
+        self._current_section_key = None
 
-    def phase(self, title: str, detail: str | None = None, *, stream_title: str | None = None) -> None:
+    def phase(
+        self,
+        title: str,
+        detail: str | None = None,
+        *,
+        stream_title: str | None = None,
+        render: bool = True,
+    ) -> None:
         """Render a phase separator."""
         if not self.enabled:
             return
 
         self._phase_title = title
         self._stream_title = stream_title or title
+
+        if not render:
+            return
 
         rule_cls = self._rich.get("Rule")
         if self._console is not None and rule_cls:
@@ -475,17 +490,14 @@ class CliUI:
 
     def thinking(self, text: str) -> None:
         """Stream model reasoning text when enabled."""
-        if self._ensure_stream_session():
-            self._stream_thinking_buffer += text
-            self._update_stream_preview()
-            return
         self._write(text, style="yellow")
 
     def answer(self, text: str) -> None:
         """Stream assistant answer text."""
-        if self._ensure_stream_session():
-            self._stream_answer_buffer += text
-            self._update_stream_preview()
+        self._stream_answer_buffer += text
+        if self._markdown_stream_enabled():
+            self._ensure_stream_header()
+            self._flush_stream_markdown()
             return
         self._write(text)
 
@@ -495,37 +507,37 @@ class CliUI:
             return
 
         text_cls = self._rich.get("Text")
+        self._ensure_stream_header()
+
         if self._console is not None and text_cls:
-            if not self._stream_open:
-                self._suspend_progress()
-                self._stream_open = True
             rendered = text_cls(text, style=style) if style else text_cls(text)
             self._console.print(rendered, end="")
             self._console.file.flush()
             return
         print(text, end="", file=sys.stderr, flush=True)
 
-    def stream_done(self) -> None:
+    def stream_done(self, content: str | None = None) -> None:
         """Terminate the current streamed line."""
         if not self.enabled:
             return
-        if self._stream_live is not None:
-            self._update_stream_preview()
-            self._stream_live.stop()
-            self._stream_live = None
-            self._stream_open = False
+
+        final_content = content if content is not None else self._stream_answer_buffer
+        if self._markdown_stream_enabled():
+            if final_content:
+                self._ensure_stream_header()
+                self._flush_stream_markdown(final=True, content=final_content)
+            self._close_stream_frame()
             self._clear_stream_state()
-            self._resume_progress()
             return
+
         if self._console is not None:
             if self._stream_open:
                 self._console.print()
                 self._console.file.flush()
-                self._stream_open = False
-                self._clear_stream_state()
-                self._resume_progress()
-                return
-            self._console.print()
+            else:
+                self._console.print()
+            self.render_markdown(self._stream_title, final_content)
+            self._clear_stream_state()
             return
         print(file=sys.stderr)
         self._clear_stream_state()
@@ -538,19 +550,13 @@ class CliUI:
         markdown_cls = self._rich.get("Markdown")
         panel_cls = self._rich.get("Panel")
         if self._console is not None and markdown_cls and panel_cls:
-            self._console.print(panel_cls(markdown_cls(content), title=title, border_style="blue"))
+            self._console.print(panel_cls(markdown_cls(content), title=f"{title} Markdown", border_style="blue"))
             return
         print(content, file=sys.stderr)
 
     def close(self) -> None:
         """Stop any active progress display."""
-        if self._stream_live is not None:
-            self._stream_live.stop()
-            self._stream_live = None
-        self._stream_open = False
-        self._progress_suspended = False
         self._clear_stream_state()
-        self._stop_progress()
 
     def complete(self, output_path: str | Path) -> None:
         """Stop progress tracking and render the final success message."""
