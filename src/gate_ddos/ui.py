@@ -7,6 +7,7 @@ from typing import Any
 
 
 try:
+    from rich.cells import cell_len
     from rich.console import Console, Group
     from rich.markdown import Markdown
     from rich.panel import Panel
@@ -22,6 +23,7 @@ else:
         "Panel": Panel,
         "Rule": Rule,
         "Text": Text,
+        "cell_len": cell_len,
     }
 
 
@@ -257,19 +259,33 @@ class CliUI:
         border.append("╮", style="blue")
         return border
 
-    def _stream_frame_line(self, line: str = ""):
+    def _stream_frame_line(self, line: Any = ""):
         """Build one line inside the static draft frame."""
         content_width = self._stream_frame_content_width()
-        if len(line) > content_width:
-            line = line[:content_width]
         text_cls = self._rich.get("Text")
-        padded = line.ljust(content_width)
+        cell_len_fn = self._rich.get("cell_len")
         if text_cls is None:
+            plain = line if isinstance(line, str) else getattr(line, "plain", str(line))
+            if len(plain) > content_width:
+                plain = plain[:content_width]
+            padded = plain.ljust(content_width)
             return f"│ {padded} │"
+
+        if isinstance(line, str):
+            rendered = text_cls.from_ansi(line)
+        else:
+            rendered = line.copy() if hasattr(line, "copy") else text_cls(str(line))
+
+        visible_width = cell_len_fn(rendered.plain) if cell_len_fn else len(rendered.plain)
+        if visible_width > content_width:
+            rendered.truncate(content_width, overflow="crop")
+            visible_width = cell_len_fn(rendered.plain) if cell_len_fn else len(rendered.plain)
 
         framed = text_cls()
         framed.append("│ ", style="blue")
-        framed.append(padded)
+        framed.append_text(rendered)
+        if visible_width < content_width:
+            framed.append(" " * (content_width - visible_width))
         framed.append(" │", style="blue")
         return framed
 
@@ -335,7 +351,9 @@ class CliUI:
             width=self._stream_frame_content_width(),
             soft_wrap=False,
             highlight=False,
-            color_system=None,
+            color_system="truecolor",
+            force_terminal=True,
+            legacy_windows=False,
         )
         render_console.print(markdown_cls(content), end="")
         rendered = capture.getvalue().rstrip("\n")

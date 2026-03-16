@@ -99,6 +99,57 @@ class CliUiTests(unittest.TestCase):
         self.assertIn("╰", output)
         self.assertIn("│", output)
 
+    def test_streamed_markdown_preserves_bold_styling(self):
+        ui = CliUI(backend="ollama", model="test", enabled=True)
+        ui._console = Console(
+            file=io.StringIO(),
+            width=60,
+            soft_wrap=False,
+            force_terminal=True,
+            color_system="truecolor",
+            legacy_windows=False,
+        )
+        ui.start_template("template.md", "output.md", 1)
+        ui.section_generating("SUMMARY", "one sentence", force=False)
+        ui.phase("Draft")
+
+        ui.answer("**bold**")
+        ui.stream_done("**bold**")
+
+        console_file = cast(io.StringIO, ui._console.file)
+        output = console_file.getvalue()
+
+        self.assertNotIn("**bold**", output)
+        self.assertIn("\x1b[1m", output)
+        self.assertIn("bold", output)
+
+    def test_streamed_markdown_renders_tables(self):
+        ui = CliUI(backend="ollama", model="test", enabled=True)
+        ui._console = Console(
+            file=io.StringIO(),
+            width=60,
+            soft_wrap=False,
+            force_terminal=False,
+            color_system=None,
+        )
+        ui.start_template("template.md", "output.md", 1)
+        ui.section_generating("SUMMARY", "one sentence", force=False)
+        ui.phase("Draft")
+
+        table = "| A | B |\n|---|---|\n| 1 | 2 |"
+        ui.answer(table)
+        ui.stream_done(table)
+
+        console_file = cast(io.StringIO, ui._console.file)
+        output = console_file.getvalue()
+
+        self.assertNotIn("| A | B |", output)
+        self.assertIn("A", output)
+        self.assertIn("B", output)
+        self.assertIn("1", output)
+        self.assertIn("2", output)
+        self.assertIn("─", output)
+
     def test_phase_can_use_distinct_stream_panel_title(self):
         ui = CliUI(backend="ollama", model="test", enabled=True)
 
