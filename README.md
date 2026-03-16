@@ -1,20 +1,16 @@
 # Gate Distributed Document Oriented Solution
 
-Fill a `.docx` template with LLM-generated content.
+Standalone CLI tool for filling templates with LLM-generated content.
 
-Write a DOCX file with `{{ KEY || prompt }}` placeholders. Point the tool at a system-prompt file and a model running in Ollama. It generates each section, renders the Markdown output as DOCX formatting (headings, lists, tables, bold) and saves the result.
-
----
+Use a template file with `{{ KEY || prompt }}` placeholders, a system-prompt file and an LLM endpoint. The tool fills the template once per section, can reuse cached results and writes the final content back into the output file.
 
 ## Prerequisites
 
 | Requirement | Notes |
 |---|---|
 | Python 3.10+ | |
-| [Ollama](https://ollama.com) | Running on `http://localhost:11434` |
-| A model | Default: `qwen3.5:9b` Download: `ollama pull qwen3.5:9b` |
-
----
+| Backend endpoint | Example: Ollama at `http://localhost:11434/v1` or an OpenAI-compatible `/v1` URL |
+| A model | Default: `qwen3.5:9b` |
 
 ## Quick start
 
@@ -27,18 +23,30 @@ source .venv/bin/activate    # macOS / Linux
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Pull the default model
+# 3. Set up config and environment variables
+cp config.example.json config.json
+cp env.example .env
+
+# 4. Pull the default model
 ollama pull qwen3.5:9b
 
-# 4. Run
+# 5. Run
 python gate-ddos.py SYSTEM_PROMPT.md TEMPLATE.docx -o OUTPUT.docx
 ```
 
----
+## How it works
 
-## Placeholders
+At a high level, the tool does this:
 
-Add these anywhere in a DOCX (paragraphs, table cells, headers, footers):
+1. Load configuration, system prompt, template and optional JSON cache.
+2. Find placeholders such as `{{ SUMMARY || Write a short summary. }}`.
+3. For each placeholder, either reuse a cached section or call the LLM once.
+4. Render the generated section text back into the target output format.
+5. Persist the final section outputs back to the JSON cache.
+
+This makes it useful when you want a structured draft from a fixed template instead of chatting section-by-section by hand.
+
+## Template format
 
 ```text
 {{ SUMMARY     || Give the project name as one sentence. }}
@@ -48,114 +56,73 @@ Add these anywhere in a DOCX (paragraphs, table cells, headers, footers):
 
 | Format | Behaviour |
 |---|---|
-| `{{ KEY \|\| prompt }}` | Calls the LLM; output replaces the placeholder |
+| `{{ KEY \|\| prompt }}` | Calls the LLM once; output replaces the placeholder |
 | `{{ KEY }}` | Lookup-only uses the JSON cache value; becomes empty if absent |
 
-Rules:
+Important behavior:
 - The same key with the same prompt reuses the first generated output everywhere.
-- The same key with a **different** prompt raises an error.
+- If a cached key is run again with a different prompt on a later run, it is regenerated and the cache entry is updated.
+- The same key with a different prompt in the same document raises a warning and leaves the conflicting placeholder unchanged.
 - Placeholders can span multiple paragraphs.
 
----
+## Common commands
 
-## Options
+DOCX output:
 
-```text
-python gate-ddos.py SYSTEM_PROMPT.md TEMPLATE.docx [options]
+```bash
+python gate-ddos.py SYSTEM_PROMPT.md TEMPLATE.docx -o OUTPUT.docx
 ```
 
-| Option | Default | Description |
-|---|---|---|
-| `-o / --output PATH` | `<template>-new.docx` | Output file |
-| `--model MODEL` | `qwen3.5:9b` | Ollama model |
-| `--json PATH` | off | Cache file: reuse existing outputs, write new ones back |
-| `--force` | off | Ignore JSON cache and regenerate all prompt sections |
-| `--open-delim TEXT` | `{{` | Placeholder opening delimiter |
-| `--close-delim TEXT` | `}}` | Placeholder closing delimiter |
-| `--separator TEXT` | `\|\|` | Key / prompt separator |
+Markdown or text output:
 
-### JSON cache
+```bash
+python gate-ddos.py SYSTEM_PROMPT.md TEMPLATE.md -o OUTPUT.md
+```
+
+Reuse cache:
+
+```bash
+python gate-ddos.py SYSTEM_PROMPT.md TEMPLATE.docx --json cache.json
+python gate-ddos.py SYSTEM_PROMPT.md TEMPLATE.docx --json cache.json --force
+```
+
+See all available flags:
+
+```bash
+python gate-ddos.py --help
+```
+
+The CLI output is designed to be informative and user-friendly, with clear sections for configuration, generation progress and final output.
+
+## Configuration
+
+Configuration details in `config.example.json`, so that file should be the main reference.
+
+In short:
+- Use `config.json` for non-secret defaults.
+- Use `.env` for secrets such as API keys.
+- CLI flags override config values.
+
+## JSON cache
 
 Pass `--json run-data.json` to cache generated sections. On the next run, sections already in the file are reused without calling the LLM. Missing sections are generated and merged back in.
 
-```bash
-# First run generates and saves
-python gate-ddos.py SYSTEM.md TEMPLATE.docx --json cache.json
+Output extension rules:
 
-# Subsequent runs reuses cache, only generates new sections
-python gate-ddos.py SYSTEM.md TEMPLATE.docx --json cache.json
+- `.docx` template requires `.docx` output.
+- `.md`/`.txt` template requires `.md` or `.txt` output.
 
-# Force regeneration of all prompt sections
-python gate-ddos.py SYSTEM.md TEMPLATE.docx --json cache.json --force
-```
+## Testing
 
-**Cache file format:**
-
-```json
-{
-  "version": 1,
-  "generatedAt": "2026-03-05T12:34:56.000000+00:00",
-  "model": "qwen3.5:9b",
-  "sections": {
-    "SUMMARY": {
-      "prompt": "Give the project name as one sentence.",
-      "output": "Generated markdown here",
-      "source": "llm"
-    }
-  }
-}
-```
-
-Manual/static values can be provided with a flat shorthand:
-
-```json
-{ "FOOTER": "Internal use only" }
-```
-
-### Custom delimiters
-
-```bash
-python gate-ddos.py SYSTEM.md TEMPLATE.docx --open-delim "[[" --close-delim "]]" --separator "::"
-```
-
-Then use `[[ SUMMARY :: Write a short summary. ]]` in the DOCX.
-
-### API gateway auth
-
-If LLM sits behind a gateway that requires a token:
-
-```bash
-set OPENAI_API_KEY=your-token   # Windows
-export OPENAI_API_KEY=your-token # macOS/Linux
-```
-
----
-
-## Code structure
-
-```
-gate-ddos.py                   Thin entry-point (sets up sys.path, calls main)
-src/gate_ddos/
-  cli.py                       Argument parsing and pipeline orchestration
-  template_engine.py           Placeholder regex, parsing, and replacer factory
-  section_store.py             In-memory cache, deduplication and prompt-mismatch detection
-  json_cache.py                JSON cache read/write
-  llm.py                       LLM streaming client
-  models.py                    SectionRecord and TemplateSyntax dataclasses
-  utils.py                     File reading and path validation
-  constants.py                 Default model name and JSON schema version
-  docx/
-    __init__.py                Re-exports process_template_docx
-    pipeline.py                DOCX traversal, placeholder replacement, Markdown->DOCX rendering
-    styles.py                  Ensures required styles (headings, lists, tables) are present
-    markdown.py                Markdown newline normalization for DOCX output
-    html.py                    HTML post-processing (blockquotes, paragraph spacing)
-```
-
----
-
-## Run tests
+Run the full test suite:
 
 ```bash
 python -m unittest discover -s tests
 ```
+
+Run a single test module:
+
+```bash
+python -m unittest tests.test_docx_pipeline
+```
+

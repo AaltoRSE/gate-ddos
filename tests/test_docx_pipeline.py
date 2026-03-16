@@ -1,6 +1,8 @@
 import tempfile
 import unittest
 import sys
+import re
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,7 +12,7 @@ if str(SRC) not in sys.path:
 
 from docx import Document
 
-from gate_ddos.docx import process_template_docx
+from gate_ddos.docx import DocxPipeline
 from gate_ddos.docx.styles import ensure_required_styles
 from gate_ddos.docx.html import postprocess_html
 from gate_ddos.docx.markdown import normalize_newlines
@@ -18,7 +20,24 @@ from gate_ddos.models import SectionRecord, TemplateSyntax
 from gate_ddos.section_store import SectionStore
 
 
-class DocxPipelineTests(unittest.TestCase):
+class _DocxPipelineMixin:
+    def _docx_xml(self, docx_path: Path) -> tuple[str, str]:
+        with zipfile.ZipFile(docx_path) as zf:
+            rels = zf.read("word/_rels/document.xml.rels").decode("utf-8", errors="ignore")
+            docxml = zf.read("word/document.xml").decode("utf-8", errors="ignore")
+        return rels, docxml
+
+    def _process_docx(self, template_path: Path, output_path: Path, *, store=None, generate=None):
+        DocxPipeline(
+            "sys",
+            TemplateSyntax(),
+            store or SectionStore(),
+            generate or (lambda *_: "unused"),
+        ).process(template_path, output_path)
+
+
+class DocxPipelineTests(_DocxPipelineMixin, unittest.TestCase):
+
     def test_multiline_placeholder_spanning_paragraphs(self):
         with tempfile.TemporaryDirectory() as tmp:
             template_path = Path(tmp) / "template.docx"
@@ -27,18 +46,100 @@ class DocxPipelineTests(unittest.TestCase):
             template = Document()
             template.add_paragraph("{{ SYSTEM_DESCRIPTION || Describe the system")
             template.add_paragraph("from a non-technical point of view. }}")
-            template.save(template_path)
+            template.save(str(template_path))
 
-            def fake_generate(system_prompt, prompt, model):
+            def fake_generate(system_prompt, prompt):
                 self.assertIn("non-technical", prompt)
                 return "Generated description"
 
-            process_template_docx(template_path=template_path, output_path=output_path, system_prompt="sys", model="m", syntax=TemplateSyntax(), store=SectionStore(), generate=fake_generate)
+            self._process_docx(template_path, output_path, generate=fake_generate)
 
-            result = Document(output_path)
+            result = Document(str(output_path))
             joined = "\n".join(p.text for p in result.paragraphs)
             self.assertIn("Generated description", joined)
             self.assertNotIn("{{", joined)
+
+    def test_markdown_link_becomes_clickable_hyperlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template_path = Path(tmp) / "template.docx"
+            output_path = Path(tmp) / "output.docx"
+
+            template = Document()
+            template.add_paragraph("{{ CONTENT || p }}")
+            template.save(str(template_path))
+
+            store = SectionStore({
+                "CONTENT": SectionRecord(
+                    prompt="p",
+                    output="See [Google](https://www.google.com) for details.",
+                    source="json",
+                ),
+            })
+
+            self._process_docx(template_path, output_path, store=store)
+
+            rels, docxml = self._docx_xml(output_path)
+            self.assertIn("https://www.google.com", rels)
+            self.assertIn("<w:hyperlink", docxml)
+
+    def test_bare_url_stays_as_plain_text(self):
+        """A bare URL (not markdown formatted) must NOT be converted to a hyperlink."""
+        with tempfile.TemporaryDirectory() as tmp:
+            template_path = Path(tmp) / "template.docx"
+            output_path = Path(tmp) / "output.docx"
+
+            template = Document()
+            template.add_paragraph("{{ CONTENT || p }}")
+            template.save(str(template_path))
+
+            store = SectionStore({
+                "CONTENT": SectionRecord(
+                    prompt="p",
+                    output="See https://www.google.com for details.",
+                    source="json",
+                ),
+            })
+            self._process_docx(template_path, output_path, store=store)
+
+            _, docxml = self._docx_xml(output_path)
+            self.assertNotIn("<w:hyperlink", docxml)
+            result = Document(str(output_path))
+            joined = " ".join(p.text for p in result.paragraphs)
+            self.assertIn("https://www.google.com", joined)
+
+    def test_common_rich_markdown_features_render(self):
+        """Footnotes, strike, sup/sub, and horizontal rules should survive DOCX conversion."""
+        with tempfile.TemporaryDirectory() as tmp:
+            template_path = Path(tmp) / "template.docx"
+            output_path = Path(tmp) / "output.docx"
+
+            template = Document()
+            template.add_paragraph("{{ CONTENT || p }}")
+            template.save(str(template_path))
+
+            store = SectionStore({
+                "CONTENT": SectionRecord(
+                    prompt="p",
+                    output=(
+                        "Term[^1] with ~~obsolete~~ note and H^^2^^O plus X~2~.\n\n"
+                        "---\n\n"
+                        "[^1]: Footnote body"
+                    ),
+                    source="json",
+                ),
+            })
+
+            self._process_docx(template_path, output_path, store=store)
+
+            result = Document(str(output_path))
+            texts = [p.text for p in result.paragraphs]
+            joined = "\n".join(texts)
+
+            self.assertIn("Footnote body", joined)
+            self.assertIn("obsolete", joined)
+            self.assertIn("H2O", joined)
+            self.assertIn("X2", joined)
+            self.assertIn("________________________________________", joined)
 
     def test_empty_placeholder_output_removes_line(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -49,11 +150,11 @@ class DocxPipelineTests(unittest.TestCase):
             template.add_paragraph("Before")
             template.add_paragraph("{{ MISSING }}")
             template.add_paragraph("After")
-            template.save(template_path)
+            template.save(str(template_path))
 
-            process_template_docx(template_path=template_path, output_path=output_path, system_prompt="sys", model="m", syntax=TemplateSyntax(), store=SectionStore(), generate=lambda *_: "unused")
+            self._process_docx(template_path, output_path)
 
-            result = Document(output_path)
+            result = Document(str(output_path))
             non_empty = [paragraph.text.strip() for paragraph in result.paragraphs if paragraph.text.strip()]
             self.assertEqual(non_empty, ["Before", "After"])
 
@@ -73,7 +174,7 @@ class DocxPipelineTests(unittest.TestCase):
             template.add_paragraph("{{ DESCRIPTION || Describe the system.")
             template.add_paragraph("Consider users and installation.")
             template.add_paragraph("}}")
-            template.save(template_path)
+            template.save(str(template_path))
 
             store = SectionStore({
                 "NAME": SectionRecord(prompt="Name of system:", output="ACME Tool", source="json"),
@@ -84,10 +185,9 @@ class DocxPipelineTests(unittest.TestCase):
                     source="json",
                 ),
             })
+            self._process_docx(template_path, output_path, store=store)
 
-            process_template_docx(template_path=template_path, output_path=output_path, system_prompt="sys", model="m", syntax=TemplateSyntax(), store=store, generate=lambda *_: "unused")
-
-            result = Document(output_path)
+            result = Document(str(output_path))
             texts = [p.text for p in result.paragraphs]
             self.assertEqual(texts, ["Header", "ACME Tool", "", "MIT", "", "Section heading", "A great tool."])
 
@@ -128,7 +228,7 @@ class DocxPipelineTests(unittest.TestCase):
                 if name_el is not None and name_el.get(_qn("w:val")) in ("List Bullet", "List Number"):
                     styles_elem.remove(el)
             template.add_paragraph("{{ ITEMS || List items }}")
-            template.save(template_path)
+            template.save(str(template_path))
 
             store = SectionStore({
                 "ITEMS": SectionRecord(
@@ -138,9 +238,9 @@ class DocxPipelineTests(unittest.TestCase):
                 ),
             })
 
-            process_template_docx(template_path=template_path, output_path=output_path, system_prompt="sys", model="m", syntax=TemplateSyntax(), store=store, generate=lambda *_: "unused")
+            self._process_docx(template_path, output_path, store=store)
 
-            result = Document(output_path)
+            result = Document(str(output_path))
             joined = " ".join(p.text for p in result.paragraphs)
             self.assertIn("Alpha", joined)
             self.assertIn("Beta", joined)
@@ -150,15 +250,17 @@ class DocxPipelineTests(unittest.TestCase):
 class NormalizeNewlinesTests(unittest.TestCase):
     """Tests for normalize_newlines edge cases."""
 
-    def test_single_newline_becomes_hard_break(self):
-        """A lone \\n should be converted to a Markdown hard break."""
-        result = normalize_newlines("line1\nline2")
-        self.assertEqual(result, "line1  \nline2")
+    def test_basic_newline_normalization_cases(self):
+        cases = [
+            ("line1\nline2", "line1  \nline2"),
+            ("para1\n\npara2", "para1\n\npara2"),
+            ("hello", "hello"),
+            ("", ""),
+        ]
 
-    def test_double_newline_unchanged(self):
-        """\\n\\n is a standard Markdown paragraph break kept as-is."""
-        result = normalize_newlines("para1\n\npara2")
-        self.assertEqual(result, "para1\n\npara2")
+        for original, expected in cases:
+            with self.subTest(original=original):
+                self.assertEqual(normalize_newlines(original), expected)
 
     def test_triple_newline_inserts_sentinel(self):
         """\\n\\n\\n should produce a sentinel for 1 extra blank paragraph."""
@@ -190,35 +292,35 @@ class NormalizeNewlinesTests(unittest.TestCase):
         self.assertIn("```\na\nb\n```", result)
         self.assertIn("after  \nmore", result)
 
-    def test_tilde_fenced_code_preserved(self):
-        """~~~ fenced code blocks are also preserved."""
-        code = "~~~\ncode\n~~~"
-        result = normalize_newlines(code)
-        self.assertEqual(result, code)
+    def test_fence_variants_preserved(self):
+        cases = [
+            "```\nline1\nline2\n```",
+            "```python\ndef foo():\n    pass\n```",
+            "~~~\ncode\n~~~",
+        ]
 
-    def test_no_newlines(self):
-        """Plain text without newlines passes through unchanged."""
-        self.assertEqual(normalize_newlines("hello"), "hello")
+        for code in cases:
+            with self.subTest(code=code):
+                self.assertEqual(normalize_newlines(code), code)
 
-    def test_empty_string(self):
-        self.assertEqual(normalize_newlines(""), "")
+    def test_newline_before_list_starter_upgraded_to_blank(self):
+        cases = [
+            ("prose\n- item1\n- item2", "- item1", "- item2"),
+            ("intro\n1. first\n2. second", "1. first", "2. second"),
+        ]
 
-    def test_newline_before_bullet_list_upgraded_to_blank(self):
-        """\n before the FIRST bullet item must become \n\n; between items stays bare."""
-        result = normalize_newlines("prose\n- item1\n- item2")
-        self.assertNotIn("  \n-", result)
-        self.assertIn("\n\n- item1", result)
-        # Consecutive list items must NOT get \n\n -> tight list, no <p> per item.
-        self.assertNotIn("\n\n- item2", result)
-        self.assertIn("\n- item2", result)
+        for original, first_item, second_item in cases:
+            with self.subTest(original=original):
+                result = normalize_newlines(original)
+                self.assertIn(f"\n\n{first_item}", result)
+                self.assertNotIn(f"\n\n{second_item}", result)
+                self.assertIn(f"\n{second_item}", result)
 
-    def test_newline_before_numbered_list_upgraded_to_blank(self):
-        result = normalize_newlines("intro\n1. first\n2. second")
-        self.assertNotIn("  \n1", result)
-        self.assertIn("\n\n1. first", result)
-        # Items within the list stay tight.
-        self.assertNotIn("\n\n2. second", result)
-        self.assertIn("\n2. second", result)
+    def test_heading_before_bullet_list_stays_bare(self):
+        """A heading line already closes a block; do not add extra blank before following list."""
+        result = normalize_newlines("## Heading\n- item")
+        self.assertNotIn("\n\n- item", result)
+        self.assertIn("\n- item", result)
 
     def test_newline_before_heading_stays_bare(self):
         """# headings can interrupt paragraphs leave the \n bare (not hard break, not \n\n)."""
@@ -274,8 +376,27 @@ class PostprocessHtmlTests(unittest.TestCase):
         self.assertNotIn("<blockquote>", result)
         self.assertIn("margin-left", result)
 
+    def test_loose_list_item_paragraph_is_flattened(self):
+        """A leading paragraph in a list item should be unwrapped before DOCX conversion."""
+        html = "<ol><li><p><strong>Heading</strong>:</p><ul><li>Child</li></ul></li></ol>"
+        result = postprocess_html(html)
+        self.assertRegex(result, r"<p>1\.\s*<strong>\s*Heading</strong>:</p>")
+        self.assertIn("<ul><li>Child</li></ul>", result)
 
-class DocxNewlineOutputTests(unittest.TestCase):
+    def test_single_paragraph_list_item_is_flattened(self):
+        """A list item containing only one <p> must be flattened to avoid blank bullet line in DOCX."""
+        html = "<ul><li><p><strong>Definition and Scope</strong>: Administrative logins refer</p></li></ul>"
+        result = postprocess_html(html)
+        self.assertIn("<ul><li><strong>Definition and Scope</strong>: Administrative logins refer</li></ul>", result)
+
+    def test_unordered_list_is_converted_to_bulleted_paragraphs(self):
+        """Unordered list HTML should remain list markup for DOCX list style handling."""
+        html = "<ul><li>First</li><li>Second</li></ul>"
+        result = postprocess_html(html)
+        self.assertIn("<ul><li>First</li><li>Second</li></ul>", result)
+
+
+class DocxNewlineOutputTests(_DocxPipelineMixin, unittest.TestCase):
     """End-to-end tests that verify newline handling produces correct DOCX output."""
 
     def test_double_newline_produces_blank_paragraph(self):
@@ -286,7 +407,7 @@ class DocxNewlineOutputTests(unittest.TestCase):
 
             template = Document()
             template.add_paragraph("{{ CONTENT || Provide content }}")
-            template.save(template_path)
+            template.save(str(template_path))
 
             store = SectionStore({
                 "CONTENT": SectionRecord(
@@ -296,9 +417,9 @@ class DocxNewlineOutputTests(unittest.TestCase):
                 ),
             })
 
-            process_template_docx(template_path=template_path, output_path=output_path, system_prompt="sys", model="m", syntax=TemplateSyntax(), store=store, generate=lambda *_: "unused")
+            self._process_docx(template_path, output_path, store=store)
 
-            result = Document(output_path)
+            result = Document(str(output_path))
             texts = [p.text for p in result.paragraphs]
             # There should be an empty paragraph between the two content paragraphs
             self.assertIn("First paragraph", texts)
@@ -315,7 +436,7 @@ class DocxNewlineOutputTests(unittest.TestCase):
 
             template = Document()
             template.add_paragraph("{{ CONTENT || Provide content }}")
-            template.save(template_path)
+            template.save(str(template_path))
 
             store = SectionStore({
                 "CONTENT": SectionRecord(
@@ -325,9 +446,9 @@ class DocxNewlineOutputTests(unittest.TestCase):
                 ),
             })
 
-            process_template_docx(template_path=template_path, output_path=output_path, system_prompt="sys", model="m", syntax=TemplateSyntax(), store=store, generate=lambda *_: "unused")
+            self._process_docx(template_path, output_path, store=store)
 
-            result = Document(output_path)
+            result = Document(str(output_path))
             texts = [p.text for p in result.paragraphs]
             self.assertIn("Top", texts)
             self.assertIn("Bottom", texts)
@@ -335,6 +456,95 @@ class DocxNewlineOutputTests(unittest.TestCase):
             bottom_idx = texts.index("Bottom")
             gap = bottom_idx - top_idx
             self.assertGreater(gap, 2, "Expected at least 2 blank paragraphs for \\n\\n\\n")
+
+    def test_loose_numbered_item_keeps_text_on_same_line(self):
+        """A numbered item followed by a blank line and nested bullets must keep its heading inline."""
+        with tempfile.TemporaryDirectory() as tmp:
+            template_path = Path(tmp) / "template.docx"
+            output_path = Path(tmp) / "output.docx"
+
+            template = Document()
+            template.add_paragraph("{{ CONTENT || Provide content }}")
+            template.save(str(template_path))
+
+            store = SectionStore({
+                "CONTENT": SectionRecord(
+                    prompt="Provide content",
+                    output=(
+                        "arrangement involved solely the act of copying and pasting.\n\n"
+                        "2.  **Technical Implementation of Cookie Deletion**:\n\n"
+                        "    *   **Target Scope**: The script"
+                    ),
+                    source="json",
+                ),
+            })
+
+            self._process_docx(template_path, output_path, store=store)
+
+            result = Document(str(output_path))
+            texts = [p.text for p in result.paragraphs]
+            heading_line = next(t for t in texts if "Technical Implementation of Cookie Deletion:" in t)
+            self.assertTrue(heading_line.startswith("2."))
+            self.assertRegex(heading_line, r"^2\.\s+Technical")
+            self.assertTrue(any("Target Scope: The script" in line for line in texts))
+
+    def test_new_ordered_list_restarts_from_one(self):
+        """A later ordered list in the same document should render from 1, not continue previous numbering."""
+        with tempfile.TemporaryDirectory() as tmp:
+            template_path = Path(tmp) / "template.docx"
+            output_path = Path(tmp) / "output.docx"
+
+            template = Document()
+            template.add_paragraph("{{ FIRST || First list }}")
+            template.add_paragraph("Between")
+            template.add_paragraph("{{ SECOND || Second list }}")
+            template.save(str(template_path))
+
+            store = SectionStore({
+                "FIRST": SectionRecord(prompt="First list", output="1. one\n2. two", source="json"),
+                "SECOND": SectionRecord(
+                    prompt="Second list",
+                    output="1. **Code Generation and Authorship Methodology**: The source code was",
+                    source="json",
+                ),
+            })
+
+            self._process_docx(template_path, output_path, store=store)
+
+            result = Document(str(output_path))
+            texts = [p.text for p in result.paragraphs if p.text.strip()]
+            self.assertIn("1. one", texts)
+            self.assertIn("2. two", texts)
+            self.assertTrue(
+                any(re.match(r"^1\.\s+Code Generation and Authorship Methodology: The source code was$", line) for line in texts)
+            )
+
+    def test_heading_followed_by_list_has_no_empty_gap(self):
+        """A heading before a list should not get a converter-added blank paragraph."""
+        with tempfile.TemporaryDirectory() as tmp:
+            template_path = Path(tmp) / "template.docx"
+            output_path = Path(tmp) / "output.docx"
+
+            template = Document()
+            template.add_paragraph("System administrator permissions", style="Heading 2")
+            template.add_paragraph("{{ CONTENT || Provide content }}")
+            template.save(str(template_path))
+
+            store = SectionStore({
+                "CONTENT": SectionRecord(
+                    prompt="Provide content",
+                    output="- **Definition and Scope**: Administrative",
+                    source="json",
+                ),
+            })
+
+            self._process_docx(template_path, output_path, store=store)
+
+            result = Document(str(output_path))
+            texts = [p.text for p in result.paragraphs]
+            self.assertEqual(texts[0], "System administrator permissions")
+            self.assertNotEqual(texts[1], "")
+            self.assertIn("Definition and Scope: Administrative", texts[1])
 
 
 if __name__ == "__main__":

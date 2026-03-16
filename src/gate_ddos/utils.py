@@ -36,6 +36,7 @@ def ensure_docx_path(path: str | Path, label: str) -> Path:
 
 
 def default_output_path(template_path: str | Path) -> str:
-    """Generate a default output path by appending '-new' to the template filename."""
+    """Generate a default output path by appending '-new' and preserving extension."""
     template = Path(template_path)
-    return str(template.with_name(f"{template.stem}-new.docx"))
+    suffix = template.suffix or ".txt"
+    return str(template.with_name(f"{template.stem}-new{suffix}"))

@@ -6,6 +6,7 @@ MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
 # Newline before list/table line - upgrade to double newline to ensure block parsing.
 BLOCK_STARTER_RE = re.compile(r"(?<!\n)\n(?=[ \t]*(?:[-*+][ \t]|\d+[.)][ \t]|\|))")
 LIST_OR_TABLE_LINE_RE = re.compile(r"[ \t]*(?:[-*+][ \t]|\d+[.)][ \t]|\|)")
+BLOCK_INTRO_LINE_RE = re.compile(r"[ \t]*(?:#{1,6}[ \t].*|>[ \t]?.*)")
 
 # Lone newline in prose excludes newlines before # and > which can interrupt
 # a paragraph on their own, and list/table markers handled above.
@@ -31,7 +32,9 @@ def _upgrade_block_starters(chunk: str) -> str:
         pos = m.start()
         prev_nl = chunk.rfind("\n", 0, pos)
         prev_line = chunk[prev_nl + 1 : pos] if prev_nl >= 0 else chunk[:pos]
-        if LIST_OR_TABLE_LINE_RE.match(prev_line):  # already inside the block
+        if LIST_OR_TABLE_LINE_RE.match(prev_line): # already inside the block
+            return "\n"
+        if BLOCK_INTRO_LINE_RE.match(prev_line): # heading/blockquote already ends a block
             return "\n"
         return "\n\n"
 

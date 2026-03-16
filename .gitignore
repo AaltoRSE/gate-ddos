@@ -7,4 +7,17 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+.venv/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Local application config and generated caches
+config.json
+config.local.json
+cache*.json
+
+# Office temporary files
+~$*.docx

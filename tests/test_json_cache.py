@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -37,7 +38,7 @@ class JsonCacheTests(unittest.TestCase):
 
     def test_records_from_payload_invalid_top_level(self):
         with self.assertRaises(ValueError):
-            records_from_payload(["not", "an", "object"])
+            records_from_payload(cast(Any, ["not", "an", "object"]))
 
     def test_write_json_store_creates_expected_shape(self):
         store = SectionStore({"SUMMARY": SectionRecord(prompt="Prompt", output="Output", source="llm")})

@@ -24,13 +24,10 @@ class SectionStore:
         if prompt is None:
             return existing.output if existing else ""
 
-        if existing and existing.prompt and existing.prompt != prompt:
-            raise ValueError(f"Section key '{section_key}' is reused with different prompts")
-
         if existing and not existing.prompt:
             existing.prompt = prompt
 
-        if existing and not force_generate:
+        if existing and existing.prompt == prompt and not force_generate:
             return existing.output
 
         if generator is None:

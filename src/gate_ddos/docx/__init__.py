@@ -1,3 +1,3 @@
-from .pipeline import process_template_docx
+from .pipeline import DocxPipeline
 
-__all__ = ["process_template_docx"]
+__all__ = ["DocxPipeline"]

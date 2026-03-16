@@ -1,6 +1,7 @@
 import unittest
 import sys
 from pathlib import Path
+from typing import Callable, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -44,11 +45,15 @@ class SectionStoreTests(unittest.TestCase):
         value = store.resolve("FOOTER", None, None)
         self.assertEqual(value, "Footer text")
 
-    def test_resolve_raises_on_prompt_mismatch(self):
+    def test_resolve_regenerates_on_prompt_mismatch(self):
         store = SectionStore({"SUMMARY": SectionRecord(prompt="Prompt A", output="A", source="json")})
 
-        with self.assertRaises(ValueError):
-            store.resolve("SUMMARY", "Prompt B", lambda _: "new")
+        value = store.resolve("SUMMARY", "Prompt B", lambda _: "new")
+
+        self.assertEqual(value, "new")
+        self.assertEqual(store.records["SUMMARY"].prompt, "Prompt B")
+        self.assertEqual(store.records["SUMMARY"].output, "new")
+        self.assertEqual(store.records["SUMMARY"].source, "llm")
 
     def test_resolve_force_generate_overrides_cached_prompted_section(self):
         store = SectionStore({"SUMMARY": SectionRecord(prompt="Prompt", output="cached", source="json")})
@@ -66,7 +71,7 @@ class SectionStoreTests(unittest.TestCase):
     def test_resolve_raises_when_generator_returns_none(self):
         store = SectionStore()
         with self.assertRaises(RuntimeError):
-            store.resolve("MISSING", "Prompt", lambda _: None)
+            store.resolve("MISSING", "Prompt", cast(Callable[[str], str], lambda _: None))
 
 
 if __name__ == "__main__":

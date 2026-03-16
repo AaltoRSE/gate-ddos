@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 from docx import Document
+from docx.document import Document as DocxDocument
 
 
 REQUIRED_STYLES = (
@@ -16,7 +17,7 @@ REQUIRED_STYLES = (
 )
 
 
-def _copy_numbering_part_if_missing(doc: Document, baseline: Document) -> None:
+def _copy_numbering_part_if_missing(doc: DocxDocument, baseline: DocxDocument) -> None:
     """Copy the numbering part from baseline to doc if doc is missing it."""
     from docx.opc.constants import RELATIONSHIP_TYPE as RT
     from docx.opc.packuri import PackURI
@@ -33,16 +34,20 @@ def _copy_numbering_part_if_missing(doc: Document, baseline: Document) -> None:
     except KeyError:
         return
 
+    package = doc.part.package
+    if package is None:
+        return
+
     new_part = NumberingPart(
         PackURI("/word/numbering.xml"),
         bl_num.content_type,
         deepcopy(bl_num._element),
-        doc.part.package,
+        package,
     )
     doc.part.relate_to(new_part, RT.NUMBERING)
 
 
-def ensure_required_styles(doc: Document) -> None:
+def ensure_required_styles(doc: DocxDocument) -> None:
     """Ensure the document has all styles required for Markdown conversion."""
     existing_names = {s.name for s in doc.styles}
     missing = [n for n in REQUIRED_STYLES if n not in existing_names]

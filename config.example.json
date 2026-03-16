@@ -1,0 +1,16 @@
+{
+  "model": "qwen3.5:9b",
+  "backend": "ollama",
+  "apiBase": "http://localhost:11434/v1",
+  "json": "cache.json",
+  "force": false,
+  "llm": {
+    "thinking": false,
+    "stream": true
+  },
+  "syntax": {
+    "openDelim": "{{",
+    "closeDelim": "}}",
+    "separator": "||"
+  }
+}
