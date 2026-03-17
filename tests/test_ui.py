@@ -52,6 +52,23 @@ class CliUiTests(unittest.TestCase):
         self.assertIn("5 words", output)
         self.assertIn("1.6s", output)
 
+    def test_json_cache_section_only_logs_completion_line(self):
+        ui = CliUI(backend="ollama", model="test", enabled=True)
+        ui._console = None
+
+        stderr = io.StringIO()
+        original_stderr = sys.stderr
+        sys.stderr = stderr
+        try:
+            ui.start_template("template.md", "output.md", 31)
+            ui.section_done("Dependencies on other systems", "JSON file", "word " * 516)
+        finally:
+            sys.stderr = original_stderr
+
+        output = stderr.getvalue()
+        self.assertIn("[1/31] Dependencies on other systems | JSON file", output)
+        self.assertNotIn("using JSON file", output)
+
     def test_stream_output_prints_section_heading_once(self):
         ui = CliUI(backend="ollama", model="test", enabled=True)
         ui._console = Console(file=io.StringIO(), width=60, soft_wrap=False, force_terminal=False, color_system=None)

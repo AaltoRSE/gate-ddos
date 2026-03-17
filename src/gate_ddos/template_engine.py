@@ -146,7 +146,6 @@ class TemplateEngine:
             else:
                 rec_source = self.store.records[section_key].source
                 label = "JSON file" if rec_source == "json" else "LLM cache"
-                self.ui.section_cached(section_key, label)
                 self.ui.section_done(section_key, label, output)
         return output
 

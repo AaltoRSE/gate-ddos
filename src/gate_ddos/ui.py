@@ -415,12 +415,6 @@ class CliUI:
             style="cyan",
         )
 
-    def section_cached(self, section_key: str, source_label: str) -> None:
-        """Report cache reuse for a prompted section."""
-        self._active_section_started_at = None
-        self._set_current_section(section_key)
-        self.note(f"{self._section_label(section_key)} | using {source_label}", style="blue")
-
     def section_done(self, section_key: str, source_label: str, text: str = "") -> None:
         """Advance the section progress bar and print a short completion line."""
         if not self.enabled:
